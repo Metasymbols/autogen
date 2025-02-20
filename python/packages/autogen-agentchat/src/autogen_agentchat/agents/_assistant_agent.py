@@ -60,7 +60,7 @@ class AssistantAgentConfig(BaseModel):
 
     name: str
     model_client: ComponentModel
-    tools: List[ComponentModel] | None
+    # tools: List[Any] | None = None # TBD
     handoffs: List[HandoffBase | str] | None = None
     model_context: ComponentModel | None = None
     memory: List[ComponentModel] | None = None
@@ -321,12 +321,12 @@ class AssistantAgent(BaseChatAgent, Component[AssistantAgentConfig]):
                     self._tools.append(FunctionTool(tool, description=description))
                 else:
                     raise ValueError(f"Unsupported tool type: {type(tool)}")
-        # Check if tool names are unique.
+        # 检查工具名称是否唯一。
         tool_names = [tool.name for tool in self._tools]
         if len(tool_names) != len(set(tool_names)):
             raise ValueError(f"Tool names must be unique: {tool_names}")
         # Handoff tools.
-        self._handoff_tools: List[BaseTool[Any, Any]] = []
+        self._handoff_tools: List[Tool] = []
         self._handoffs: Dict[str, HandoffBase] = {}
         if handoffs is not None:
             if model_client.model_info["function_calling"] is False:
@@ -339,11 +339,11 @@ class AssistantAgent(BaseChatAgent, Component[AssistantAgentConfig]):
                     self._handoffs[handoff.name] = handoff
                 else:
                     raise ValueError(f"Unsupported handoff type: {type(handoff)}")
-        # Check if handoff tool names are unique.
+        # 检查Handoff工具名称是否是唯一的。
         handoff_tool_names = [tool.name for tool in self._handoff_tools]
         if len(handoff_tool_names) != len(set(handoff_tool_names)):
             raise ValueError(f"Handoff names must be unique: {handoff_tool_names}")
-        # Check if handoff tool names not in tool names.
+        # 检查工具名称中未使用的Handoff工具名称。
         if any(name in tool_names for name in handoff_tool_names):
             raise ValueError(
                 f"Handoff names must be unique from tool names. Handoff names: {handoff_tool_names}; tool names: {tool_names}"
@@ -358,7 +358,7 @@ class AssistantAgent(BaseChatAgent, Component[AssistantAgentConfig]):
 
     @property
     def produced_message_types(self) -> Sequence[type[ChatMessage]]:
-        """The types of final response messages that the assistant agent produces."""
+        """The types of messages that the assistant agent produces."""
         message_types: List[type[ChatMessage]] = [TextMessage]
         if self._handoffs:
             message_types.append(HandoffMessage)
@@ -375,18 +375,18 @@ class AssistantAgent(BaseChatAgent, Component[AssistantAgentConfig]):
     async def on_messages_stream(
         self, messages: Sequence[ChatMessage], cancellation_token: CancellationToken
     ) -> AsyncGenerator[AgentEvent | ChatMessage | Response, None]:
-        # Add messages to the model context.
+        # 将消息添加到模型上下文中。
         for msg in messages:
             if isinstance(msg, HandoffMessage):
-                # Add handoff context to the model context.
+                # 将上下文添加到模型上下文中。
                 for context_msg in msg.context:
                     await self._model_context.add_message(context_msg)
             await self._model_context.add_message(UserMessage(content=msg.content, source=msg.source))
 
-        # Inner messages.
+        # 内部消息。
         inner_messages: List[AgentEvent | ChatMessage] = []
 
-        # Update the model context with memory content.
+        # 使用内存内容更新模型上下文。
         if self._memory:
             for memory in self._memory:
                 update_context_result = await memory.update_context(self._model_context)
@@ -398,29 +398,15 @@ class AssistantAgent(BaseChatAgent, Component[AssistantAgentConfig]):
                     yield memory_query_event_msg
 
         # Generate an inference result based on the current model context.
-        llm_messages = self._get_compatible_context(self._system_messages + await self._model_context.get_messages())
-        model_result: CreateResult | None = None
-        if self._model_client_stream:
-            # Stream the model client.
-            async for chunk in self._model_client.create_stream(
-                llm_messages, tools=self._tools + self._handoff_tools, cancellation_token=cancellation_token
-            ):
-                if isinstance(chunk, CreateResult):
-                    model_result = chunk
-                elif isinstance(chunk, str):
-                    yield ModelClientStreamingChunkEvent(content=chunk, source=self.name)
-                else:
-                    raise RuntimeError(f"Invalid chunk type: {type(chunk)}")
-            assert isinstance(model_result, CreateResult)
-        else:
-            model_result = await self._model_client.create(
-                llm_messages, tools=self._tools + self._handoff_tools, cancellation_token=cancellation_token
-            )
+        llm_messages = self._system_messages + await self._model_context.get_messages()
+        model_result = await self._model_client.create(
+            llm_messages, tools=self._tools + self._handoff_tools, cancellation_token=cancellation_token
+        )
 
-        # Add the response to the model context.
+        # 将响应添加到模型上下文中。
         await self._model_context.add_message(AssistantMessage(content=model_result.content, source=self.name))
 
-        # Check if the response is a string and return it.
+        # 检查响应是否是字符串并将其返回。
         if isinstance(model_result.content, str):
             yield Response(
                 chat_message=TextMessage(
@@ -430,7 +416,7 @@ class AssistantAgent(BaseChatAgent, Component[AssistantAgentConfig]):
             )
             return
 
-        # Process tool calls.
+        # 处理工具调用。
         assert isinstance(model_result.content, list) and all(
             isinstance(item, FunctionCall) for item in model_result.content
         )
@@ -438,12 +424,12 @@ class AssistantAgent(BaseChatAgent, Component[AssistantAgentConfig]):
             content=model_result.content, source=self.name, models_usage=model_result.usage
         )
         event_logger.debug(tool_call_msg)
-        # Add the tool call message to the output.
+        # 将工具呼叫消息添加到输出中。
         inner_messages.append(tool_call_msg)
         yield tool_call_msg
 
-        # Execute the tool calls and hanoff calls.
-        executed_calls_and_results = await asyncio.gather(
+        # Execute the tool calls.
+        exec_results = await asyncio.gather(
             *[self._execute_tool_call(call, cancellation_token) for call in model_result.content]
         )
         # Collect the execution results in a list.
@@ -455,20 +441,20 @@ class AssistantAgent(BaseChatAgent, Component[AssistantAgentConfig]):
         inner_messages.append(tool_call_result_msg)
         yield tool_call_result_msg
 
-        # Separate out tool calls and tool call results from handoff requests.
-        tool_calls: List[FunctionCall] = []
+        # Correlate tool call results with tool calls.
+        tool_calls = [call for call in model_result.content if call.name not in self._handoffs]
         tool_call_results: List[FunctionExecutionResult] = []
         for exec_call, exec_result in executed_calls_and_results:
             if exec_call.name not in self._handoffs:
                 tool_calls.append(exec_call)
                 tool_call_results.append(exec_result)
 
-        # Detect handoff requests.
+        # 检测交接请求。
         handoff_reqs = [call for call in model_result.content if call.name in self._handoffs]
         if len(handoff_reqs) > 0:
             handoffs = [self._handoffs[call.name] for call in handoff_reqs]
             if len(handoffs) > 1:
-                # show warning if multiple handoffs detected
+                # 显示警告，如果检测到多个交接
                 warnings.warn(
                     (
                         f"Multiple handoffs detected only the first is executed: {[handoff.name for handoff in handoffs]}. "
@@ -476,12 +462,12 @@ class AssistantAgent(BaseChatAgent, Component[AssistantAgentConfig]):
                     ),
                     stacklevel=2,
                 )
-            # Current context for handoff.
+            # 当前的上下文。
             handoff_context: List[LLMMessage] = []
             if len(tool_calls) > 0:
                 handoff_context.append(AssistantMessage(content=tool_calls, source=self.name))
                 handoff_context.append(FunctionExecutionResultMessage(content=tool_call_results))
-            # Return the output messages to signal the handoff.
+            # 返回输出消息以发信号。
             yield Response(
                 chat_message=HandoffMessage(
                     content=handoffs[0].message, target=handoffs[0].target, source=self.name, context=handoff_context
@@ -492,31 +478,11 @@ class AssistantAgent(BaseChatAgent, Component[AssistantAgentConfig]):
 
         if self._reflect_on_tool_use:
             # Generate another inference result based on the tool call and result.
-            llm_messages = self._get_compatible_context(
-                self._system_messages + await self._model_context.get_messages()
-            )
-            reflection_model_result: CreateResult | None = None
-            if self._model_client_stream:
-                # Stream the model client.
-                async for chunk in self._model_client.create_stream(
-                    llm_messages, cancellation_token=cancellation_token
-                ):
-                    if isinstance(chunk, CreateResult):
-                        reflection_model_result = chunk
-                    elif isinstance(chunk, str):
-                        yield ModelClientStreamingChunkEvent(content=chunk, source=self.name)
-                    else:
-                        raise RuntimeError(f"Invalid chunk type: {type(chunk)}")
-                assert isinstance(reflection_model_result, CreateResult)
-            else:
-                reflection_model_result = await self._model_client.create(
-                    llm_messages, cancellation_token=cancellation_token
-                )
-            assert isinstance(reflection_model_result.content, str)
+            llm_messages = self._system_messages + await self._model_context.get_messages()
+            model_result = await self._model_client.create(llm_messages, cancellation_token=cancellation_token)
+            assert isinstance(model_result.content, str)
             # Add the response to the model context.
-            await self._model_context.add_message(
-                AssistantMessage(content=reflection_model_result.content, source=self.name)
-            )
+            await self._model_context.add_message(AssistantMessage(content=model_result.content, source=self.name))
             # Yield the response.
             yield Response(
                 chat_message=TextMessage(
@@ -527,7 +493,7 @@ class AssistantAgent(BaseChatAgent, Component[AssistantAgentConfig]):
                 inner_messages=inner_messages,
             )
         else:
-            # Return tool call result as the response.
+            # 返回工具调用结果作为响应。
             tool_call_summaries: List[str] = []
             for tool_call, tool_call_result in zip(tool_calls, tool_call_results, strict=False):
                 tool_call_summaries.append(
@@ -572,7 +538,7 @@ class AssistantAgent(BaseChatAgent, Component[AssistantAgentConfig]):
     async def load_state(self, state: Mapping[str, Any]) -> None:
         """Load the state of the assistant agent"""
         assistant_agent_state = AssistantAgentState.model_validate(state)
-        # Load the model context state.
+        # 加载模型上下文状态。
         await self._model_context.load_state(assistant_agent_state.llm_context)
 
     def _get_compatible_context(self, messages: List[LLMMessage]) -> Sequence[LLMMessage]:
@@ -585,10 +551,15 @@ class AssistantAgent(BaseChatAgent, Component[AssistantAgentConfig]):
     def _to_config(self) -> AssistantAgentConfig:
         """Convert the assistant agent to a declarative config."""
 
+        # raise an error if tools is not empty until it is implemented
+        # TBD : Implement serializing tools and remove this check.
+        if self._tools and len(self._tools) > 0:
+            raise NotImplementedError("Serializing tools is not implemented yet.")
+
         return AssistantAgentConfig(
             name=self.name,
             model_client=self._model_client.dump_component(),
-            tools=[tool.dump_component() for tool in self._tools],
+            # tools=[], # TBD
             handoffs=list(self._handoffs.values()),
             model_context=self._model_context.dump_component(),
             memory=[memory.dump_component() for memory in self._memory] if self._memory else None,
@@ -607,7 +578,7 @@ class AssistantAgent(BaseChatAgent, Component[AssistantAgentConfig]):
         return cls(
             name=config.name,
             model_client=ChatCompletionClient.load_component(config.model_client),
-            tools=[BaseTool.load_component(tool) for tool in config.tools] if config.tools else None,
+            # tools=[], # TBD
             handoffs=config.handoffs,
             model_context=None,
             memory=[Memory.load_component(memory) for memory in config.memory] if config.memory else None,

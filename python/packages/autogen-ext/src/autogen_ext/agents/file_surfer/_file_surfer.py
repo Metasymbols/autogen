@@ -21,7 +21,7 @@ from autogen_core.models import (
 
 from ._markdown_file_browser import MarkdownFileBrowser
 
-# from typing_extensions import Annotated
+# 从打字扩展导入注释
 from ._tool_definitions import (
     TOOL_FIND_NEXT,
     TOOL_FIND_ON_PAGE_CTRL_F,
@@ -32,28 +32,28 @@ from ._tool_definitions import (
 
 
 class FileSurfer(BaseChatAgent):
-    """An agent, used by MagenticOne, that acts as a local file previewer. FileSurfer can open and read a variety of common file types, and can navigate the local file hierarchy.
+    """MagenticOne 使用的代理，充当本地文件预览器。 FileSurfer 可以打开和读取各种常见文件类型，并且可以导航本地文件层次结构。
 
-    Installation:
+    安装：
 
-    .. code-block:: bash
+    .. 代码块:: bash
 
         pip install "autogen-ext[file-surfer]"
 
-    Args:
-        name (str): The agent's name
-        model_client (ChatCompletionClient): The model to use (must be tool-use enabled)
-        description (str): The agent's description used by the team. Defaults to DEFAULT_DESCRIPTION
+    参数：
+        name (str): 代理人的姓名
+        model_client (ChatCompletionClient)：要使用的模型（必须启用工具使用）
+        description (str)：团队使用的代理描述。默认为 DEFAULT_DESCRIPTION
 
     """
 
-    DEFAULT_DESCRIPTION = "An agent that can handle local files."
+    DEFAULT_DESCRIPTION = "可以处理本地文件的代理。"
 
     DEFAULT_SYSTEM_MESSAGES = [
         SystemMessage(
             content="""
-        You are a helpful AI Assistant.
-        When given a user query, use available functions to help the user with their request."""
+        你是一个有用的人工智能助手。
+        当给出用户查询时，使用可用的函数来帮助用户满足他们的请求。"""
         ),
     ]
 
@@ -75,18 +75,22 @@ class FileSurfer(BaseChatAgent):
     async def on_messages(self, messages: Sequence[ChatMessage], cancellation_token: CancellationToken) -> Response:
         for chat_message in messages:
             if isinstance(chat_message, TextMessage | MultiModalMessage):
-                self._chat_history.append(UserMessage(content=chat_message.content, source=chat_message.source))
+                self._chat_history.append(UserMessage(
+                    content=chat_message.content, source=chat_message.source))
             else:
-                raise ValueError(f"Unexpected message in FileSurfer: {chat_message}")
+                raise ValueError(
+                    f"FileSurfer 中出现意外消息： {chat_message}")
 
         try:
             _, content = await self._generate_reply(cancellation_token=cancellation_token)
-            self._chat_history.append(AssistantMessage(content=content, source=self.name))
+            self._chat_history.append(AssistantMessage(
+                content=content, source=self.name))
             return Response(chat_message=TextMessage(content=content, source=self.name))
 
         except BaseException:
-            content = f"File surfing error:\n\n{traceback.format_exc()}"
-            self._chat_history.append(AssistantMessage(content=content, source=self.name))
+            content = f"文件浏览错误：\n\n{traceback.format_exc()}"
+            self._chat_history.append(AssistantMessage(
+                content=content, source=self.name))
             return Response(chat_message=TextMessage(content=content, source=self.name))
 
     async def on_reset(self, cancellation_token: CancellationToken) -> None:
@@ -94,7 +98,7 @@ class FileSurfer(BaseChatAgent):
 
     def _get_browser_state(self) -> Tuple[str, str]:
         """
-        Get the current state of the browser, including the header and content.
+        获取浏览器的当前状态，包括标题和内容。
         """
         header = f"Path: {self._browser.path}\n"
 
@@ -103,7 +107,8 @@ class FileSurfer(BaseChatAgent):
 
         current_page = self._browser.viewport_current_page
         total_pages = len(self._browser.viewport_pages)
-        header += f"Viewport position: Showing page {current_page+1} of {total_pages}.\n"
+        header += f"视口位置：显示页面 {
+            current_page+1} of {total_pages}.\n"
 
         return (header, self._browser.viewport)
 
@@ -112,13 +117,14 @@ class FileSurfer(BaseChatAgent):
         last_message = self._chat_history[-1]
         assert isinstance(last_message, UserMessage)
 
-        task_content = last_message.content  # the last message from the sender is the task
+        task_content = last_message.content  # 发件人的最后一条消息是一个任务
 
         assert self._browser is not None
 
         context_message = UserMessage(
             source="user",
-            content=f"Your file viewer is currently open to the file or directory '{self._browser.page_title}' with path '{self._browser.path}'.",
+            content=f"您的文件查看器当前已打开该文件或目录'{
+                self._browser.page_title}' 有路径'{self._browser.path}'.",
         )
 
         task_message = UserMessage(
@@ -141,7 +147,7 @@ class FileSurfer(BaseChatAgent):
         response = create_result.content
 
         if isinstance(response, str):
-            # Answer directly.
+            # 直接回答。
             return False, response
 
         elif isinstance(response, list) and all(isinstance(item, FunctionCall) for item in response):
@@ -152,7 +158,8 @@ class FileSurfer(BaseChatAgent):
                 try:
                     arguments = json.loads(function_call.arguments)
                 except json.JSONDecodeError as e:
-                    error_str = f"File surfer encountered an error decoding JSON arguments: {e}"
+                    error_str = f"文件浏览器在解码 JSON 参数时遇到错误: {
+                        e}"
                     return False, error_str
 
                 if tool_name == "open_path":
